@@ -211,23 +211,24 @@ class LSFS:
             elif operation_type == "create_file":
                 file_path = agent_request.query.params.get("file_path", None)
                 result = self.sto_create_file(
-                    file_path, collection_name
+                    _file_path=file_path,
+                    collection_name=collection_name
                 )
 
             elif operation_type == "create_dir":
                 dir_path = agent_request.query.params.get("dir_path", None)
                 result = self.sto_create_directory(
-                    dir_path=dir_path,
+                    _dir_path=dir_path,
                     collection_name=collection_name
                 )
                 
             elif operation_type == "write":
-                file_name = agent_request.query.params.get("file_name", None)
+                # file_name = agent_request.query.params.get("file_name", None)
                 file_path = agent_request.query.params.get("file_path", None)
                 content = agent_request.query.params.get("content", None)
                 # breakpoint()
                 result = self.sto_write(
-                    file_name=file_name,
+                    file_name=None,
                     file_path=file_path,
                     content=content,
                     collection_name=collection_name
@@ -268,10 +269,9 @@ class LSFS:
             result = f"Error handling file operation: {str(e)}"
         return result
 
-    def sto_create_file(self, file_name: str, file_path: str, collection_name: str = None) -> bool:
+    def sto_create_file(self, _file_path: str, collection_name: str = None) -> str:
         try:
-            if file_path is None:
-                file_path = os.path.join(self.root_dir, file_name)
+            file_path = os.path.join(self.root_dir, _file_path)
             
             if not os.path.exists(file_path):
                 with open(file_path, 'w') as f:
@@ -285,10 +285,9 @@ class LSFS:
         except Exception as e:
             return f"Error creating file: {str(e)}"
             
-    def sto_create_directory(self, dir_name: str, dir_path: str, collection_name: str = None) -> bool:
+    def sto_create_directory(self, _dir_path: str, collection_name: str = None) -> str:
         try:
-            if dir_path is None:
-                dir_path = os.path.join(self.root_dir, dir_name)
+            dir_path = os.path.join(self.root_dir, _dir_path)
             
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path)
@@ -314,8 +313,7 @@ class LSFS:
             
     def sto_write(self, file_name: str, file_path: str, content: str, collection_name: str = None) -> str:
         """Write to file with proper lock management."""
-        if file_path is None:
-            file_path = os.path.join(self.root_dir, file_name)
+        file_path = os.path.join(self.root_dir, file_path)
             
         lock = self.get_file_lock(file_path)
         try:
@@ -341,7 +339,7 @@ class LSFS:
             print(f"Error retrieving documents: {str(e)}")
             return []
             
-    def sto_rollback(self, file_path, n=1, time=None) -> bool:
+    def sto_rollback(self, file_path, n=1, time=None) -> str:
         try:
             if not self.use_redis:
                 return "Redis is not enabled. Please make sure the redis server has been installed and running."
