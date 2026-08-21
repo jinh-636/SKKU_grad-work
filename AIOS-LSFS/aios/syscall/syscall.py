@@ -266,10 +266,11 @@ class SyscallExecutor:
         
         parser_response = self.execute_llm_syscall(agent_name, query)["response"]
         file_operations = parser_response.tool_calls
+        print(f"Parsed file operations: {file_operations}")
         
         # breakpoint()
         
-        operation_summaries = []
+        operation_results = []
         
         # Execute each file operation
         for operation in file_operations:
@@ -282,6 +283,7 @@ class SyscallExecutor:
             storage_response = self.execute_storage_syscall(agent_name, storage_query)
             
             # Summarize operation result
+            """
             summary_query = LLMQuery(
                 messages=[{
                     "role": "user",
@@ -292,14 +294,36 @@ class SyscallExecutor:
             )
             summary = self.execute_llm_syscall(agent_name, summary_query)["response"].response_message
             operation_summaries.append(summary)
+            """
+
+            # Save operation result
+            response = storage_response.get("response", None)
+            operation_results.append({
+                "operation": operation.get("name"),
+                "parameters": operation.get("parameters"),
+                "result": (
+                    response.response_message
+                    if response is not None
+                    else "Storage operation failed"
+                ),
+            })
         
         # Generate final summary
         final_query = LLMQuery(
-            messages=[{
-                "role": "user",
-                "content": f"Tell me what you have done from {json.dumps(operation_summaries)} with a friendly tone. "
-                          f"Try to be concise and maintain the key information including file name, file path, etc"
-            }],
+            messages=[
+                {
+                    "role": "system",
+                    "content":  f"Summarize the file operation results in execution order. "
+                                f"Try to be concise and maintain the key information including file name, file path, etc. "
+                                f"Write one concise line for each operation. "
+                                f"Preserve file paths and success or failure status exactly. "
+                                f"Do not provide alternatives, headings, emojis, or invented details."
+                },
+                {
+                    "role": "user",
+                    "content": f"File operation results: {json.dumps(operation_results)}"
+                }
+            ],
             action_type="chat"
         )
         
