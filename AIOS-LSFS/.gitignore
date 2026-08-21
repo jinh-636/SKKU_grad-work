@@ -7,6 +7,7 @@ __pycache__
 context_restoration
 .pytest_cache
 .env
+.lsfs
 temp/
 pyopenagi/environments/
 deplogs.txt

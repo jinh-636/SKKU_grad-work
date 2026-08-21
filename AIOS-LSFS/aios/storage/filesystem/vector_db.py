@@ -5,12 +5,12 @@ from llama_index.core import SimpleDirectoryReader
 import hashlib
 
 class ChromaDB:
-    def __init__(self, mount_dir) -> None:
+    def __init__(self, db_dir) -> None:
         super().__init__()
-        self.mount_dir = mount_dir
+        self.db_dir = db_dir
         # self.build_database()
 
-        self.client = chromadb.PersistentClient(self.mount_dir)
+        self.client = chromadb.PersistentClient(self.db_dir)
         # self.collection = self.add_or_get_collection(collection_name)
         
     def add_or_get_collection(self, collection_name):

@@ -11,4 +11,5 @@ StorageRequestQueueCheckEmpty: TypeAlias = Callable[[], bool]
 
 class StorageManagerParams(BaseModel):
     root_dir: str
+    db_dir: str
     use_vector_db: bool = False

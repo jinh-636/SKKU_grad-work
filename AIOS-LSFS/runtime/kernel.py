@@ -250,6 +250,7 @@ async def setup_storage(config: StorageConfig):
     try:
         storage_manager = useStorageManager(
             root_dir=config.root_dir,
+            db_dir=config.db_dir,
             use_vector_db=config.use_vector_db,
             **(config.vector_db_config or {}),
         )

@@ -37,11 +37,12 @@ class FileChangeHandler(FileSystemEventHandler):
             self.lsfs.handle_file_change(event.src_path, "deleted")
 
 class LSFS:
-    def __init__(self, root_dir, use_vector_db=True, max_versions=20):
+    def __init__(self, root_dir, db_dir, use_vector_db=True, max_versions=20):
         self.root_dir = root_dir
+        self.db_dir = db_dir
         self.use_vector_db = use_vector_db
         self.max_versions = max_versions
-        self.vector_db = ChromaDB(mount_dir=self.root_dir)
+        self.vector_db = ChromaDB(db_dir=self.db_dir)
         
         # Initialize Redis connection
         self.redis_client = redis.Redis(

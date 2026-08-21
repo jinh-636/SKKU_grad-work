@@ -9,13 +9,15 @@ from .filesystem.lsfs import LSFS
 from cerebrum.storage.apis import StorageResponse
 
 class StorageManager:
-    def __init__(self, root_dir, use_vector_db=True, filesystem_type="lsfs"):
+    def __init__(self, root_dir, db_dir, use_vector_db=True, filesystem_type="lsfs"):
         self.use_vector_db = use_vector_db
         self.filesystem_type = filesystem_type
         self.root_dir = root_dir
+        self.db_dir = db_dir
         os.makedirs(self.root_dir, exist_ok=True)
+        os.makedirs(self.db_dir, exist_ok=True)
         if filesystem_type == "lsfs":
-            self.filesystem = LSFS(root_dir, use_vector_db)
+            self.filesystem = LSFS(root_dir, db_dir, use_vector_db)
 
     def address_request(self, agent_request):
         result = self.filesystem.address_request(agent_request)

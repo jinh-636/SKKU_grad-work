@@ -165,6 +165,7 @@ def initialize_storage_manager(storage_config: dict) -> Any:
     try:
         storage_manager = useStorageManager(
             root_dir=storage_config.get("root_dir", "root"),
+            db_dir=storage_config.get("db_dir", ".lsfs"),
             use_vector_db=storage_config.get("use_vector_db", True),
             **(storage_config.get("vector_db_config", {}) or {}),
         )
