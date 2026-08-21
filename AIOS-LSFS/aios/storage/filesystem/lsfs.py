@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Set, Optional
 import hashlib
 import threading
 from urllib.parse import urljoin
+from pathlib import Path
 import uuid
 import requests
 
@@ -86,7 +87,21 @@ class LSFS:
             if file_path not in self.file_locks:
                 self.file_locks[file_path] = threading.Lock()
             return self.file_locks[file_path]
-            
+
+    def resolve_path(self, raw_path: str) -> str:
+        if raw_path is None or not raw_path.strip():
+            raise ValueError("File path is required")
+
+        root = Path(self.root_dir).resolve()
+        relative_path = Path(raw_path.lstrip("/"))
+
+        # Prevent root/root/test.txt
+        if relative_path.parts and relative_path.parts[0] == root.name:
+            relative_path = Path(*relative_path.parts[1:])
+
+        path = (root / relative_path).resolve()
+        return str(path)
+    
     def handle_file_change(self, file_path: str, change_type: str):
         # """Handle file changes with proper lock management."""
         lock = self.get_file_lock(file_path)
@@ -197,9 +212,9 @@ class LSFS:
         
         path = None
         if operation_type in ["create_file", "write", "rollback", "share"]:
-            path = agent_request.query.params.get("file_path", None)
+            path = self.resolve_path(agent_request.query.params.get("file_path", None))
         elif operation_type == "create_dir":
-            path = agent_request.query.params.get("dir_path", None)
+            path = self.resolve_path(agent_request.query.params.get("dir_path", None))
             
         try:
             if operation_type == "mount":
@@ -210,27 +225,24 @@ class LSFS:
                 )
             
             elif operation_type == "create_file":
-                file_path = agent_request.query.params.get("file_path", None)
                 result = self.sto_create_file(
-                    _file_path=file_path,
+                    file_path=path,
                     collection_name=collection_name
                 )
 
             elif operation_type == "create_dir":
-                dir_path = agent_request.query.params.get("dir_path", None)
                 result = self.sto_create_directory(
-                    _dir_path=dir_path,
+                    dir_path=path,
                     collection_name=collection_name
                 )
                 
             elif operation_type == "write":
                 # file_name = agent_request.query.params.get("file_name", None)
-                file_path = agent_request.query.params.get("file_path", None)
                 content = agent_request.query.params.get("content", None)
                 # breakpoint()
                 result = self.sto_write(
                     file_name=None,
-                    file_path=file_path,
+                    file_path=path,
                     content=content,
                     collection_name=collection_name
                 )
@@ -247,19 +259,17 @@ class LSFS:
                 )
                 
             elif operation_type == "rollback":
-                file_path = agent_request.query.params.get("file_path", None)
                 n = agent_request.query.params.get("n", "1")
                 time = agent_request.query.params.get("time", None)
                 result = self.sto_rollback(
-                    file_path=file_path,
+                    file_path=path,
                     n=int(n),
                     time=time
                 )
 
             elif operation_type == "share":
-                file_path = agent_request.query.params.get("file_path", None)
                 result = self.sto_share(
-                    file_path=file_path,
+                    file_path=path,
                     collection_name=collection_name
                 )
         
@@ -270,10 +280,9 @@ class LSFS:
             result = f"Error handling file operation: {str(e)}"
         return result
 
-    def sto_create_file(self, _file_path: str, collection_name: str = None) -> str:
+    def sto_create_file(self, file_path: str, collection_name: str = None) -> str:
         try:
-            file_path = os.path.join(self.root_dir, _file_path)
-            
+            print(f"Attempting to create file at: {file_path}")
             if not os.path.exists(file_path):
                 with open(file_path, 'w') as f:
                     pass  # Create empty file
@@ -286,10 +295,8 @@ class LSFS:
         except Exception as e:
             return f"Error creating file: {str(e)}"
             
-    def sto_create_directory(self, _dir_path: str, collection_name: str = None) -> str:
+    def sto_create_directory(self, dir_path: str, collection_name: str = None) -> str:
         try:
-            dir_path = os.path.join(self.root_dir, _dir_path)
-            
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path)
                 # if self.use_vector_db:
@@ -314,8 +321,6 @@ class LSFS:
             
     def sto_write(self, file_name: str, file_path: str, content: str, collection_name: str = None) -> str:
         """Write to file with proper lock management."""
-        file_path = os.path.join(self.root_dir, file_path)
-            
         lock = self.get_file_lock(file_path)
         try:
             if lock.acquire(timeout=10):  # Add timeout to prevent deadlocks
