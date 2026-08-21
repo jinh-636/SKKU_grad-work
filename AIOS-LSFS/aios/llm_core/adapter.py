@@ -277,7 +277,7 @@ class LLMAdapter:
     def execute_llm_syscall(
         self,
         llm_syscall,
-        temperature: float = 0.0
+        temperature: float = 1.0
     ) -> LLMResponse:
         """
         Address request sent from the agent.
