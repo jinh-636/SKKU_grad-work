@@ -92,11 +92,11 @@ class ChromaDB:
                 collection_name = "terminal"
                 
             collection = self.add_or_get_collection(collection_name)
-            file_name = os.path.basename(file_path)
+            file_hash = hashlib.md5(file_path.encode()).hexdigest()
             
-            existing = collection.get(ids=[file_name])
+            existing = collection.get(ids=[file_hash])
             if existing["ids"]:
-                collection.delete(ids=[file_name])
+                collection.delete(ids=[file_hash])
                 return True
             return False
         

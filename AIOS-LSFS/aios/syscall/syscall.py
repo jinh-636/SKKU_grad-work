@@ -259,7 +259,12 @@ class SyscallExecutor:
             result = executor.execute_file_operation("agent_1", query)
             ```        """
         # Parse file system operation
-        system_prompt = "You are a parser for parsing file system operations. Your task is to parse the instructions and return the file system operation call."
+        system_prompt = (
+            f"You parse user instructions into file system tool calls. "
+            f"If the request can be diveded multiple operations, return one tool call "
+            f"for each operation in the required execution order. "
+            f"Do not omit operations from entire user's request."
+        )
         query.messages = [{"role": "system", "content": system_prompt}] + query.messages
         query.tools = storage_syscalls
         

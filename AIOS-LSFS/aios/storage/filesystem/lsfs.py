@@ -211,11 +211,11 @@ class LSFS:
         operation_type = agent_request.query.operation_type
         
         path = None
-        if operation_type in ["create_file", "write", "rollback", "share"]:
+        if operation_type in ["create_file", "delete_file", "write", "rollback", "share"]:
             path = self.resolve_path(agent_request.query.params.get("file_path", None))
-        elif operation_type == "create_dir":
+        elif operation_type in ["create_dir", "delete_dir"]:
             path = self.resolve_path(agent_request.query.params.get("dir_path", None))
-            
+
         try:
             if operation_type == "mount":
                 root = agent_request.query.params.get("root", self.root_dir)
@@ -235,6 +235,15 @@ class LSFS:
                     dir_path=path,
                     collection_name=collection_name
                 )
+
+            elif operation_type == "delete_file":
+                result = self.sto_delete_file(
+                    file_path=path,
+                    collection_name=collection_name
+                )
+
+            elif operation_type == "delete_dir":
+                result = self.sto_delete_directory(dir_path=path)
                 
             elif operation_type == "write":
                 # file_name = agent_request.query.params.get("file_name", None)
@@ -306,6 +315,37 @@ class LSFS:
         
         except Exception as e:
             return f"Error creating directory: {str(e)}"
+
+    def sto_delete_file(self, file_path: str, collection_name: str = None) -> str:
+        try:
+            if not os.path.exists(file_path):
+                return "File does not exist at: " + file_path
+            if not os.path.isfile(file_path):
+                return "Path is not a file: " + file_path
+
+            os.remove(file_path)
+            if self.use_vector_db:
+                self.vector_db.delete_document(file_path, collection_name)
+
+            return "File has been deleted successfully at: " + file_path
+
+        except Exception as e:
+            return f"Error deleting file: {str(e)}"
+
+    def sto_delete_directory(self, dir_path: str) -> str:
+        try:
+            if not os.path.exists(dir_path):
+                return "Directory does not exist at: " + dir_path
+            if not os.path.isdir(dir_path):
+                return "Path is not a directory: " + dir_path
+
+            os.rmdir(dir_path)
+            return "Directory has been deleted successfully at: " + dir_path
+
+        except OSError as e:
+            return f"Directory is not empty or cannot be deleted: {str(e)}"
+        except Exception as e:
+            return f"Error deleting directory: {str(e)}"
             
     def sto_mount(self, collection_name: str, root_dir: str) -> str:
         try:
