@@ -1,6 +1,10 @@
 from dataclasses import dataclass, field
 
 
+class SemanticAnalysisError(ValueError):
+    """Metadata inference or validation failed; no profile is available."""
+
+
 @dataclass(frozen=True)
 class SemanticProfile:
     category: str
