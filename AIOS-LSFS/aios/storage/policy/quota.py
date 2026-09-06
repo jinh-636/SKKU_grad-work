@@ -56,6 +56,39 @@ class SemanticQuota:
                 for category, size in self.redis.hgetall(self.usage_key(agent_name)).items()
             }
 
+    def get_status(self, agent_name: str = "terminal", categories=()) -> dict:
+        """Read current usage and active limits without scanning or inference."""
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            raise ValueError("Quota status requires an agent name")
+        with self._lock:
+            usage = self.get_usage(agent_name)
+            rows = []
+            for category in sorted(set(categories) | set(self.limits) | set(usage)):
+                used = usage.get(category, 0)
+                limit = self.limits.get(category)
+                if limit is None:
+                    status = "unlimited"
+                elif used > limit:
+                    status = "exceeded"
+                elif used == limit:
+                    status = "full"
+                else:
+                    status = "available"
+                rows.append({
+                    "category": category,
+                    "used_bytes": used,
+                    "limit_bytes": limit,
+                    "remaining_bytes": None if limit is None else max(0, limit - used),
+                    "status": status,
+                })
+            return {
+                "enabled": True,
+                "root_dir": str(self.root_dir),
+                "agent_name": agent_name,
+                "total_used_bytes": sum(usage.values()),
+                "categories": rows,
+            }
+
     def get_file_metadata(self, file_path: str) -> dict:
         with self._lock:
             value = self.redis.hget(self.files_key, str(Path(file_path).resolve()))

@@ -15,6 +15,9 @@ from list_agents import get_offline_agents, get_online_agents
 from cerebrum.llm.apis import llm_chat, llm_operate_file
 
 from cerebrum.storage.apis import mount
+from cerebrum.config.config_manager import config
+
+from quota_command import show_quota
 
 class AIOSTerminal:
     def __init__(self):
@@ -59,6 +62,7 @@ class AIOSTerminal:
         # Add command descriptions
         help_table.add_row("help", "Show this help message")
         help_table.add_row("exit", "Exit the terminal")
+        help_table.add_row("quota", "Show quota usage and limits without an LLM call")
         # help_table.add_row("list agents --offline", "List all available offline agents")
         help_table.add_row("list agents --online", "List all available agents on the agenthub")
         help_table.add_row("<natural language>", "Execute semantic file operations using natural language")
@@ -84,6 +88,9 @@ class AIOSTerminal:
         else:
             self.console.print("[red]Invalid parameter. Use --offline or --online[/red]")
             self.console.print("Example: list agents --offline")
+
+    def handle_quota(self):
+        show_quota(self.console, config.get("kernel", "base_url"), agent_name="terminal")
 
     def run(self):
         welcome_msg = Text("Welcome to AIOS Terminal! Type 'help' for available commands.", style="bold cyan")
@@ -121,6 +128,14 @@ class AIOSTerminal:
                     self.display_help()
                     continue
                 
+                parts = command.strip().split()
+                if parts and parts[0].lower() == "quota":
+                    if len(parts) == 1:
+                        self.handle_quota()
+                    else:
+                        self.console.print("Usage: quota")
+                    continue
+
                 if command.startswith('list agents'):
                     args = command[len('list agents'):].strip()
                     self.handle_list_agents(args)

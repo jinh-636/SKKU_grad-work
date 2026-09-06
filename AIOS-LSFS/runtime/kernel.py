@@ -1,5 +1,6 @@
 from typing_extensions import Literal
 from fastapi import FastAPI, HTTPException, Request
+from redis.exceptions import RedisError
 from pydantic import BaseModel, Field, root_validator
 from typing import Optional, Dict, Any, Union
 from dotenv import load_dotenv
@@ -383,6 +384,22 @@ async def setup_scheduler(config: SchedulerConfig):
         raise HTTPException(
             status_code=500, detail=f"Failed to initialize scheduler: {str(e)}"
         )
+
+
+@app.get("/storage/quota")
+def get_storage_quota(agent_name: str = "terminal"):
+    """Return live quota status directly, without the LLM or syscall scheduler."""
+    storage = active_components.get("storage")
+    if storage is None:
+        raise HTTPException(status_code=503, detail="Storage manager is unavailable")
+    try:
+        return storage.get_quota_status(agent_name)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503, detail="Redis is unavailable; quota usage could not be read"
+        ) from error
 
 
 @app.get("/core/status")
