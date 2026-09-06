@@ -84,6 +84,7 @@ class LSFS:
             raise ValueError("semantic_quota.enabled must be a boolean")
         self.semantic_quota = None
         self.semantic_analyzer = None
+        self.quota_scan_result = None
         if enabled:
             if not self.use_redis:
                 raise RuntimeError("Semantic quota requires a running Redis server")
@@ -91,7 +92,11 @@ class LSFS:
                 self.redis_client, self.root_dir, quota_options.get("limits")
             )
             self.semantic_analyzer = SemanticAnalyzer.from_config()
-        # No directory scan or usage reset is performed here.
+            logging.info("Scanning existing file sizes for semantic quota: %s", self.root_dir)
+            self.quota_scan_result = self.semantic_quota.rebuild_usage(
+                self.semantic_analyzer, excluded_dirs=(self.db_dir,)
+            )
+            logging.info("Semantic quota scan completed: %s", self.quota_scan_result)
 
         # Initialize file system observer
         self.observer = Observer()
