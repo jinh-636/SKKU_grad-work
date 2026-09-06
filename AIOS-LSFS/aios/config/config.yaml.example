@@ -52,6 +52,12 @@ memory:
 storage:
   root_dir: "root"
   use_vector_db: true
+  semantic_quota:
+    enabled: true
+    limits:
+      source_code: 104857600  # 100 MiB
+      report: 52428800        # 50 MiB
+      personal: 10485760      # 10 MiB
 
 scheduler:
   log_mode: "console"

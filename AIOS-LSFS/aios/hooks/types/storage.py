@@ -13,3 +13,4 @@ class StorageManagerParams(BaseModel):
     root_dir: str
     db_dir: str
     use_vector_db: bool = False
+    semantic_quota: dict[str, Any] | None = None

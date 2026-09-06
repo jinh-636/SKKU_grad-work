@@ -78,6 +78,8 @@ class LLMConfig(BaseModel):
 
 class StorageConfig(BaseModel):
     root_dir: str = "root"
+    db_dir: str = ".lsfs"
+    semantic_quota: Optional[Dict[str, Any]] = None
     use_vector_db: bool = False
     vector_db_config: Optional[Dict[str, Any]] = None
 
@@ -252,6 +254,7 @@ async def setup_storage(config: StorageConfig):
             root_dir=config.root_dir,
             db_dir=config.db_dir,
             use_vector_db=config.use_vector_db,
+            semantic_quota=config.semantic_quota,
             **(config.vector_db_config or {}),
         )
         active_components["storage"] = storage_manager

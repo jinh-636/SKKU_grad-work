@@ -14,8 +14,13 @@ from urllib.parse import urljoin
 from pathlib import Path
 import uuid
 import requests
+import stat
+import tempfile
+from contextlib import nullcontext
 
 from .vector_db import ChromaDB
+from ..policy import SemanticAnalysisError, SemanticAnalyzer
+from ..policy.quota import SemanticQuota, SemanticQuotaExceeded
 
 import logging
 
@@ -37,8 +42,13 @@ class FileChangeHandler(FileSystemEventHandler):
         if not event.is_directory:
             self.lsfs.handle_file_change(event.src_path, "deleted")
 
+    def on_moved(self, event):
+        # Atomic quota writes rename a temporary file to the final path.
+        if not event.is_directory and os.path.basename(event.src_path).startswith(".lsfs-quota-"):
+            self.lsfs.handle_file_change(event.dest_path, "modified")
+
 class LSFS:
-    def __init__(self, root_dir, db_dir, use_vector_db=True, max_versions=20):
+    def __init__(self, root_dir, db_dir, use_vector_db=True, max_versions=20, semantic_quota=None):
         self.root_dir = root_dir
         self.db_dir = db_dir
         self.use_vector_db = use_vector_db
@@ -63,15 +73,32 @@ class LSFS:
             print(f"Failed to connect to Redis: {e}")
             self.use_redis = False
         
+        # Initialize policy and locks before the observer can receive events.
+        self.file_locks = {}
+        self.locks_lock = threading.Lock()
+        quota_options = {} if semantic_quota is None else semantic_quota
+        if not isinstance(quota_options, dict):
+            raise ValueError("semantic_quota must be a mapping")
+        enabled = quota_options.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError("semantic_quota.enabled must be a boolean")
+        self.semantic_quota = None
+        self.semantic_analyzer = None
+        if enabled:
+            if not self.use_redis:
+                raise RuntimeError("Semantic quota requires a running Redis server")
+            self.semantic_quota = SemanticQuota(
+                self.redis_client, self.root_dir, quota_options.get("limits")
+            )
+            self.semantic_analyzer = SemanticAnalyzer.from_config()
+        # No directory scan or usage reset is performed here.
+
         # Initialize file system observer
         self.observer = Observer()
         self.event_handler = FileChangeHandler(self)
         self.observer.schedule(self.event_handler, self.root_dir, recursive=True)
         self.observer.start() # temporarily disabled
         
-        # Add file locks dictionary
-        self.file_locks = {}
-        self.locks_lock = threading.Lock()  # Meta-lock for the locks dictionary
         
         
     def __del__(self):
@@ -103,6 +130,8 @@ class LSFS:
         return str(path)
     
     def handle_file_change(self, file_path: str, change_type: str):
+        if os.path.basename(file_path).startswith(".lsfs-quota-"):
+            return
         # """Handle file changes with proper lock management."""
         lock = self.get_file_lock(file_path)
         try:
@@ -117,7 +146,10 @@ class LSFS:
                         
                         # Update vector DB
                         if self.use_vector_db:
-                            self.vector_db.update_document(file_path, content)
+                            owner = "terminal"
+                            if self.semantic_quota is not None:
+                                owner = self.semantic_quota.get_file_metadata(file_path).get("owner", owner)
+                            self.vector_db.update_document(file_path, content, owner)
                             
                         # Update Redis cache with version history
                         timestamp = datetime.now().isoformat()
@@ -173,7 +205,7 @@ class LSFS:
         versions = self.redis_client.lrange(versions_key, 0, limit - 1)
         return [json.loads(v) for v in versions]
         
-    def restore_version(self, file_path: str, version_index: int) -> bool:
+    def restore_version(self, file_path: str, version_index: int, collection_name: str = None) -> bool:
         # file_lock = self.get_file_lock(file_path)
         
         # with file_lock:
@@ -193,8 +225,7 @@ class LSFS:
             if 'content' not in version_info:
                 return False
             
-            with open(file_path, 'w') as f:
-                f.write(version_info['content'])
+            self._write_with_quota(file_path, version_info['content'], collection_name)
                 
             # Update vector DB
             # if self.use_vector_db:
@@ -203,6 +234,8 @@ class LSFS:
             return True
             
         except Exception as e:
+            if isinstance(e, (SemanticQuotaExceeded, SemanticAnalysisError)):
+                raise
             print(f"Error restoring version: {str(e)}")
             return False
 
@@ -273,7 +306,8 @@ class LSFS:
                 result = self.sto_rollback(
                     file_path=path,
                     n=int(n),
-                    time=time
+                    time=time,
+                    collection_name=collection_name,
                 )
 
             elif operation_type == "share":
@@ -317,18 +351,31 @@ class LSFS:
             return f"Error creating directory: {str(e)}"
 
     def sto_delete_file(self, file_path: str, collection_name: str = None) -> str:
+        file_path = os.path.abspath(file_path)
+        lock = self.get_file_lock(file_path)
         try:
-            if not os.path.exists(file_path):
-                return "File does not exist at: " + file_path
-            if not os.path.isfile(file_path):
-                return "Path is not a file: " + file_path
+            if not lock.acquire(timeout=10):
+                return f"Timeout waiting for lock on {file_path}"
+            try:
+                if not os.path.exists(file_path):
+                    return "File does not exist at: " + file_path
+                if not os.path.isfile(file_path):
+                    return "Path is not a file: " + file_path
 
-            os.remove(file_path)
-            if self.use_vector_db:
-                self.vector_db.delete_document(file_path, collection_name)
+                quota = self.semantic_quota
+                allocation = (
+                    quota.reserve_delete(file_path)
+                    if quota is not None and not os.path.islink(file_path)
+                    else nullcontext()
+                )
+                with allocation:
+                    os.remove(file_path)
+                if self.use_vector_db:
+                    self.vector_db.delete_document(file_path, collection_name)
 
-            return "File has been deleted successfully at: " + file_path
-
+                return "File has been deleted successfully at: " + file_path
+            finally:
+                lock.release()
         except Exception as e:
             return f"Error deleting file: {str(e)}"
 
@@ -359,23 +406,53 @@ class LSFS:
             response = f"Error mounting file system: {str(e)}"
             return response
             
-    def sto_write(self, file_name: str, file_path: str, content: str, collection_name: str = None) -> str:
-        """Write to file with proper lock management."""
-        lock = self.get_file_lock(file_path)
+    def _atomic_write(self, file_path: str, content_bytes: bytes) -> None:
+        """Replace content only after the complete temporary file is written."""
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".lsfs-quota-", dir=str(Path(file_path).parent)
+        )
         try:
-            if lock.acquire(timeout=10):  # Add timeout to prevent deadlocks
-                try:
-                    with open(file_path, 'w') as f:
-                        f.write(content)
-                    
-                    return f"Content has been written to file: {file_path}"
-                finally:
-                    lock.release()  # Ensure lock is always released
+            with os.fdopen(descriptor, "wb") as file:
+                file.write(content_bytes)
+            if os.path.exists(file_path):
+                os.chmod(temporary, stat.S_IMODE(os.stat(file_path).st_mode))
+            os.replace(temporary, file_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _write_with_quota(self, file_path: str, content: str, collection_name=None) -> None:
+        if not isinstance(content, str):
+            raise TypeError("File content must be a string")
+        file_path = str(Path(file_path).resolve())
+        agent_name = collection_name or "terminal"
+        quota = self.semantic_quota
+        # LLM inference does not hold the file or accounting locks.
+        profile = self.semantic_analyzer.analyze(content) if quota is not None else None
+        content_bytes = content.encode("utf-8")
+
+        lock = self.get_file_lock(file_path)
+        if not lock.acquire(timeout=10):
+            raise TimeoutError(f"Timeout waiting for lock on {file_path}")
+        try:
+            if quota is None:
+                with open(file_path, "w", encoding="utf-8", newline="") as file:
+                    file.write(content)
             else:
-                return f"Timeout waiting for lock on {file_path}"
+                with quota.reserve_replace(
+                    agent_name, file_path, profile.category, len(content_bytes)
+                ):
+                    self._atomic_write(file_path, content_bytes)
+        finally:
+            lock.release()
+
+    def sto_write(self, file_name: str, file_path: str, content: str, collection_name: str = None) -> str:
+        try:
+            self._write_with_quota(file_path, content, collection_name)
+            return f"Content has been written to file: {file_path}"
         except Exception as e:
             return f"Error writing to file: {str(e)}"
-            
+
     def sto_retrieve(self, collection_name: str, query_text: str, k: str = "3", keywords: str = None) -> list:
         try:
             collection = self.vector_db.add_or_get_collection(collection_name)
@@ -385,7 +462,7 @@ class LSFS:
             print(f"Error retrieving documents: {str(e)}")
             return []
             
-    def sto_rollback(self, file_path, n=1, time=None) -> str:
+    def sto_rollback(self, file_path, n=1, time=None, collection_name=None) -> str:
         try:
             if not self.use_redis:
                 return "Redis is not enabled. Please make sure the redis server has been installed and running."
@@ -407,7 +484,7 @@ class LSFS:
                         target_version = i
                         
                 if target_version is not None:
-                    result = self.restore_version(file_path, target_version)
+                    result = self.restore_version(file_path, target_version, collection_name)
                     if result:
                         return f"Successfully rolled back the file: {file_path} to its previous {n} version"
                     else:
@@ -416,7 +493,7 @@ class LSFS:
                 # Rollback n versions
                 target_version = int(n)
                 
-                result = self.restore_version(file_path, target_version)
+                result = self.restore_version(file_path, target_version, collection_name)
                 if result:
                     return f"Successfully rolled back the file: {file_path} to its previous {n} version"
                 else:

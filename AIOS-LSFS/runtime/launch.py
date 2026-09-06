@@ -82,6 +82,8 @@ class LLMConfig(BaseModel):
 
 class StorageConfig(BaseModel):
     root_dir: str = "root"
+    db_dir: str = ".lsfs"
+    semantic_quota: Optional[Dict[str, Any]] = None
     use_vector_db: bool = False
     vector_db_config: Optional[Dict[str, Any]] = None
 
@@ -167,6 +169,7 @@ def initialize_storage_manager(storage_config: dict) -> Any:
             root_dir=storage_config.get("root_dir", "root"),
             db_dir=storage_config.get("db_dir", ".lsfs"),
             use_vector_db=storage_config.get("use_vector_db", True),
+            semantic_quota=storage_config.get("semantic_quota"),
             **(storage_config.get("vector_db_config", {}) or {}),
         )
         print("✅ Storage manager initialized")
