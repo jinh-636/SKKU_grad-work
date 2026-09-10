@@ -4,10 +4,13 @@ from datetime import datetime
 from llama_index.core import SimpleDirectoryReader
 import hashlib
 
+from .document_embedding import DocumentEmbedder, EMBEDDING_VERSION
+
 class ChromaDB:
     def __init__(self, db_dir) -> None:
         super().__init__()
         self.db_dir = db_dir
+        self.embedder = DocumentEmbedder()
         # self.build_database()
 
         self.client = chromadb.PersistentClient(self.db_dir)
@@ -62,8 +65,10 @@ class ChromaDB:
             metadata = {
                 "file_path": file_path,
                 "file_name": file_name,
-                "last_modified": datetime.now().isoformat()
+                "last_modified": datetime.now().isoformat(),
+                "embedding_version": EMBEDDING_VERSION,
             }
+            embedding = self.embedder.embed(file_content)
             # Check if document exists
             existing = collection.get(ids=[file_hash])
             
@@ -71,13 +76,15 @@ class ChromaDB:
                 collection.update(
                     documents=[file_content],
                     ids=[file_hash],
-                    metadatas=[metadata]
+                    metadatas=[metadata],
+                    embeddings=[embedding],
                 )
             else:
                 collection.add(
                     documents=[file_content],
                     ids=[file_hash],
-                    metadatas=[metadata]
+                    metadatas=[metadata],
+                    embeddings=[embedding],
                 )
                 
             return True
@@ -111,7 +118,7 @@ class ChromaDB:
                 query_text = f"{query_text} {keywords}"
             
             results = collection.query(
-                query_texts=[query_text],
+                query_embeddings=[self.embedder.embed(query_text)],
                 n_results=int(k)
             )
             
