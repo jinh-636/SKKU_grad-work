@@ -26,8 +26,9 @@ from cerebrum.storage.apis import StorageQuery, StorageResponse, mount, retrieve
 from cerebrum.llm.apis import LLMQuery, LLMResponse, llm_call_tool, llm_chat, llm_operate_file
 
 from quota_command import show_quota
+from operation_confirmation import FileOperationConfirmationHandler
 
-class AIOSTerminal:
+class AIOSTerminal(FileOperationConfirmationHandler):
     def __init__(self):
         self.console = Console()
         
@@ -152,8 +153,7 @@ class AIOSTerminal:
                 command_response = llm_operate_file(
                     agent_name="terminal", messages=[{"role": "user", "content": command}], tools=[], base_url=config.get('kernel', 'base_url')
                 )
-                command_output = Text(command_response, style="bold green")
-                self.console.print(command_output)
+                self._handle_operation_response(command_response)
                 
                 # response = self._post_semantic_command(command)
                 

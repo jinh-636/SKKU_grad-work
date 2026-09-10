@@ -20,7 +20,7 @@ from aios.hooks.modules.agent import useFactory
 from aios.hooks.modules.scheduler import fifo_scheduler_nonblock as fifo_scheduler
 from aios.hooks.modules.scheduler import rr_scheduler_nonblock as rr_scheduler
 
-from aios.syscall.syscall import useSysCall
+from aios.syscall.syscall import OperationDecisionError, useSysCall
 from aios.config.config_manager import config
 
 from cerebrum.llm.apis import LLMQuery, LLMResponse
@@ -136,6 +136,11 @@ class QueryRequest(BaseModel):
             values['query_data'] = type_mapping[query_type](**query_data)
             
         return values
+
+class OperationDecisionRequest(BaseModel):
+    confirmation_id: str = Field(min_length=1)
+    decision: Literal["approve", "cancel"]
+
 
 def initialize_llm_cores(config: dict) -> Any:
     """Initialize LLM core with configuration."""
@@ -586,7 +591,7 @@ async def cleanup_components():
 
 
 @app.post("/query")
-async def handle_query(request: QueryRequest):
+def handle_query(request: QueryRequest):
     # breakpoint()
     try:
         if request.query_type == "llm":
@@ -618,6 +623,17 @@ async def handle_query(request: QueryRequest):
             return execute_request(request.agent_name, query)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/operations/{request_id}/decision")
+def submit_operation_decision(request_id: str, request: OperationDecisionRequest):
+    """Resume the original executor's checkpoint without parsing the command again."""
+    try:
+        return SysCallWrapper.resume_file_operation(
+            request_id, request.confirmation_id, request.decision
+        )
+    except OperationDecisionError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+
 
 @app.post("/core/config/update")
 async def update_config(request: Request):

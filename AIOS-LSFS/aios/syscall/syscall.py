@@ -1,5 +1,8 @@
 import time
 import json
+from copy import deepcopy
+from dataclasses import dataclass, field
+from uuid import uuid4
 from typing import Dict, List, Any, Optional
 
 # Update import to use the new location
@@ -32,6 +35,25 @@ from cerebrum.memory.apis import MemoryQuery, MemoryResponse
 from cerebrum.storage.apis import StorageQuery, StorageResponse
 from cerebrum.tool.apis import ToolQuery, ToolResponse
 
+@dataclass
+class FileOperationState:
+    """An in-memory workflow checkpoint."""
+
+    request_id: str
+    agent_name: str
+    operations: List[Dict[str, Any]]
+    next_index: int = 0
+    results: List[Dict[str, Any]] = field(default_factory=list)
+    status: str = "running"
+    confirmation_id: Optional[str] = None
+
+
+class OperationDecisionError(ValueError):
+    def __init__(self, message: str, status_code: int = 409):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class SyscallExecutor:
     """
     A class that handles system call execution for different types of operations.
@@ -50,6 +72,8 @@ class SyscallExecutor:
         """Initialize the SyscallExecutor."""
         self.id = 0
         self.id_lock = threading.Lock()
+        self.pending_operations: Dict[str, FileOperationState] = {}
+        self.pending_operations_lock = threading.Lock()
     
     def create_syscall(self, agent_name: str, query) -> Dict[str, Any]:
         """
@@ -239,102 +263,166 @@ class SyscallExecutor:
         # global_llm_req_queue_add_message(syscall)
         return self._execute_syscall(agent_name, query)
 
-    def execute_file_operation(self, agent_name: str, query: LLMQuery) -> str:
-        """
-        Execute a file system operation using LLM parsing.
-        
-        Args:
-            agent_name: Name of the agent making the request
-            query: LLM query containing file operation instructions
-            
-        Returns:
-            String containing operation summary
-            
-        Example:
-            ```python
-            query = LLMQuery(
-                messages=[{"role": "user", "content": "Create a file named test.txt"}],
-                action_type="operate_file"
-            )
-            result = executor.execute_file_operation("agent_1", query)
-            ```        """
-        # Parse file system operation
+    def execute_file_operation(
+        self, agent_name: str, query: LLMQuery
+    ) -> str | Dict[str, Any]:
+        """Parse once, then execute until completion or a user decision is needed."""
+        query = deepcopy(query)
         system_prompt = (
-            f"You parse user instructions into file system tool calls. "
-            f"If the request can be diveded multiple operations, return one tool call "
-            f"for each operation in the required execution order. "
-            f"Do not omit operations from entire user's request."
+            "You parse user instructions into file system tool calls. "
+            "If the request can be divided into multiple operations, return one tool call "
+            "for each operation in the required execution order. "
+            "Do not omit operations from the user's request."
         )
         query.messages = [{"role": "system", "content": system_prompt}] + query.messages
         query.tools = storage_syscalls
-        
-        
         parser_response = self.execute_llm_syscall(agent_name, query)["response"]
-        file_operations = parser_response.tool_calls
-        print(f"Parsed file operations: {file_operations}")
-        
-        # breakpoint()
-        
-        operation_results = []
-        
-        # Execute each file operation
-        for operation in file_operations:
-            storage_query = StorageQuery(
-                operation_type=operation.get("name"),
-                params=operation.get("parameters")
-            )
-            
-            # breakpoint()
-            storage_response = self.execute_storage_syscall(agent_name, storage_query)
-            
-            # Summarize operation result
-            """
-            summary_query = LLMQuery(
-                messages=[{
-                    "role": "user",
-                    "content": f"Tell me what you have done from {storage_response} with a friendly tone. "
-                              f"Try to be concise and maintain the key information including file name, file path, etc"
-                }],
-                action_type="chat"
-            )
-            summary = self.execute_llm_syscall(agent_name, summary_query)["response"].response_message
-            operation_summaries.append(summary)
-            """
+        operations = deepcopy(parser_response.tool_calls)
+        if not operations:
+            return "No file operations were generated."
+        if not isinstance(operations, list) or any(
+            not isinstance(operation, dict)
+            or not isinstance(operation.get("name"), str)
+            or not isinstance(operation.get("parameters"), dict)
+            for operation in operations
+        ):
+            raise ValueError("The LLM returned invalid file operations")
 
-            # Save operation result
-            response = storage_response.get("response", None)
-            operation_results.append({
-                "operation": operation.get("name"),
-                "parameters": operation.get("parameters"),
-                "result": (
-                    response.response_message
-                    if response is not None
-                    else "Storage operation failed"
-                ),
+        state = FileOperationState(
+            request_id=uuid4().hex,
+            agent_name=agent_name,
+            operations=operations,
+        )
+        return self._run_file_operations(state)
+
+    def _get_confirmation_request(
+        self, state: FileOperationState, operation: Dict[str, Any]
+    ) -> Optional[str]:
+        """Return a question when a policy requires input; no policy is connected yet."""
+        return None
+
+    def _pause_file_operation(
+        self, state: FileOperationState, message: str
+    ) -> Dict[str, Any]:
+        operation = state.operations[state.next_index]
+        parameters = operation["parameters"]
+        preview = {
+            "name": operation["name"],
+            "file_path": parameters.get("file_path", parameters.get("dir_path")),
+        }
+        content = parameters.get("content")
+        if isinstance(content, str):
+            preview.update({
+                "content_preview": content[:1000],
+                "content_truncated": len(content) > 1000,
+                "size_bytes": len(content.encode("utf-8")),
             })
-        
-        # Generate final summary
+        with self.pending_operations_lock:
+            state.confirmation_id = uuid4().hex
+            state.status = "needs_confirmation"
+            self.pending_operations[state.request_id] = state
+            return {
+                "status": state.status,
+                "request_id": state.request_id,
+                "confirmation_id": state.confirmation_id,
+                "message": message,
+                "operation": preview,
+                "completed_count": state.next_index,
+                "total_count": len(state.operations),
+            }
+
+    def _run_file_operations(
+        self, state: FileOperationState, *, approved_index: Optional[int] = None
+    ) -> str | Dict[str, Any]:
+        paused = False
+        try:
+            while state.next_index < len(state.operations):
+                operation = state.operations[state.next_index]
+                # Approval applies only to this operation, never subsequent writes.
+                if state.next_index != approved_index:
+                    message = self._get_confirmation_request(state, operation)
+                    if message is not None:
+                        response = self._pause_file_operation(state, message)
+                        paused = True
+                        return response
+                storage_query = StorageQuery(
+                    operation_type=operation["name"],
+                    params=deepcopy(operation["parameters"]),
+                )
+                storage_response = self.execute_storage_syscall(state.agent_name, storage_query)
+                response = storage_response.get("response")
+                state.results.append({
+                    "operation": operation["name"],
+                    "parameters": deepcopy(operation["parameters"]),
+                    "result": response.response_message if response is not None else "Storage operation failed",
+                })
+                state.next_index += 1
+            state.status = "completed"
+            return self._summarize_file_operations(state)
+        except Exception as error:
+            # Never replay earlier side effects after an execution failure.
+            state.status = "failed"
+            return {
+                "status": state.status,
+                "request_id": state.request_id,
+                "message": f"File operation stopped: {error}",
+                "completed_count": state.next_index,
+                "results": state.results,
+            }
+        finally:
+            if not paused:
+                with self.pending_operations_lock:
+                    self.pending_operations.pop(state.request_id, None)
+
+    def resume_file_operation(
+        self, request_id: str, confirmation_id: str, decision: str
+    ) -> str | Dict[str, Any]:
+        if decision not in ("approve", "cancel"):
+            raise OperationDecisionError("Decision must be approve or cancel", 400)
+        with self.pending_operations_lock:
+            state = self.pending_operations.get(request_id)
+            if state is None:
+                raise OperationDecisionError("Pending operation not found or already finished", 404)
+            if state.status != "needs_confirmation" or state.confirmation_id != confirmation_id:
+                raise OperationDecisionError("This confirmation is no longer awaiting a decision")
+            # Claim this decision before releasing the lock or executing any syscall.
+            state.confirmation_id = None
+            if decision == "cancel":
+                state.status = "cancelled"
+                self.pending_operations.pop(request_id)
+                return {
+                    "status": state.status,
+                    "request_id": request_id,
+                    "message": "Remaining operations cancelled. Completed operations are unchanged.",
+                    "completed_count": state.next_index,
+                    "results": state.results,
+                }
+            state.status = "running"
+            approved_index = state.next_index
+        return self._run_file_operations(state, approved_index=approved_index)
+
+    def _summarize_file_operations(self, state: FileOperationState) -> str:
         final_query = LLMQuery(
             messages=[
                 {
                     "role": "system",
-                    "content":  f"Summarize the file operation results in execution order. "
-                                f"Try to be concise and maintain the key information including file name, file path, etc. "
-                                f"Write one concise line for each operation. "
-                                f"Preserve file paths and success or failure status exactly. "
-                                f"Do not provide alternatives, headings, emojis, or invented details."
+                    "content": "Summarize the file operation results in execution order. "
+                               "Try to be concise and maintain the key information including file name, file path, etc. "
+                               "Write one concise line for each operation. "
+                               "Preserve file paths and success or failure status exactly. "
+                               "Do not provide alternatives, headings, emojis, or invented details."
                 },
-                {
-                    "role": "user",
-                    "content": f"File operation results: {json.dumps(operation_results)}"
-                }
+                {"role": "user", "content": f"File operation results: {json.dumps(state.results)}"},
             ],
-            action_type="chat"
+            action_type="chat",
         )
-        
-        return self.execute_llm_syscall(agent_name, final_query)["response"].response_message
+        try:
+            return self.execute_llm_syscall(state.agent_name, final_query)["response"].response_message
+        except Exception:
+            # A summary failure must not make completed writes look retryable.
+            return "\n".join(str(result["result"]) for result in state.results)
 
-    def execute_request(self, agent_name: str, query: Any) -> Dict[str, Any]:
+    def execute_request(self, agent_name: str, query: Any) -> str | Dict[str, Any]:
         """
         Execute a request based on its type.
         
@@ -421,6 +509,7 @@ def create_syscall_executor():
         storage = executor.execute_storage_syscall
         memory = executor.execute_memory_syscall
         tool = executor.execute_tool_syscall
+        resume_file_operation = executor.resume_file_operation
 
     return executor.execute_request, SyscallWrapper
 
