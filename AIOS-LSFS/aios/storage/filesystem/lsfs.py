@@ -19,6 +19,7 @@ import tempfile
 from contextlib import nullcontext
 
 from .vector_db import ChromaDB
+from .deduplication import SemanticDeduplicator
 from ..policy import SemanticAnalysisError, SemanticAnalyzer
 from ..policy.quota import SemanticQuota, SemanticQuotaExceeded
 
@@ -294,6 +295,9 @@ class LSFS:
                     collection_name=collection_name
                 )
 
+            elif operation_type == "deduplicate_files":
+                result = self.sto_deduplicate_files(collection_name)
+
             elif operation_type == "retrieve":
                 query_text = agent_request.query.params.get("query_text", None)
                 k = agent_request.query.params.get("k", "3")
@@ -367,22 +371,34 @@ class LSFS:
                 if not os.path.isfile(file_path):
                     return "Path is not a file: " + file_path
 
-                quota = self.semantic_quota
-                allocation = (
-                    quota.reserve_delete(file_path)
-                    if quota is not None and not os.path.islink(file_path)
-                    else nullcontext()
-                )
-                with allocation:
-                    os.remove(file_path)
-                if self.use_vector_db:
-                    self.vector_db.delete_document(file_path, collection_name)
-
-                return "File has been deleted successfully at: " + file_path
+                return self._delete_file_unlocked(file_path, collection_name)
             finally:
                 lock.release()
         except Exception as e:
             return f"Error deleting file: {str(e)}"
+
+    def _delete_file_unlocked(self, file_path, collection_name):
+        """Delete with quota/index updates; the caller must hold the file lock."""
+        quota = self.semantic_quota
+        allocation = (
+            quota.reserve_delete(file_path)
+            if quota is not None and not os.path.islink(file_path)
+            else nullcontext()
+        )
+        with allocation:
+            os.remove(file_path)
+        message = "File has been deleted successfully at: " + file_path
+        if self.use_vector_db:
+            removed = self.vector_db.delete_document(file_path, collection_name)
+            if not removed:
+                message += " (Vector index removal could not be confirmed.)"
+        return message
+
+    def sto_deduplicate_files(self, collection_name="terminal"):
+        return SemanticDeduplicator(self).scan(collection_name)
+
+    def sto_apply_deduplication(self, plan, collection_name="terminal"):
+        return SemanticDeduplicator(self).apply(plan, collection_name)
 
     def sto_delete_directory(self, dir_path: str) -> str:
         try:

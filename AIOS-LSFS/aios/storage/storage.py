@@ -8,6 +8,7 @@ import zlib
 from .filesystem.lsfs import LSFS
 
 from cerebrum.storage.apis import StorageResponse
+from .deduplication import ApplyDeduplicationQuery, DeduplicationResponse
 
 class StorageManager:
     def __init__(self, root_dir, db_dir, use_vector_db=True, filesystem_type="lsfs", semantic_quota=None):
@@ -33,7 +34,21 @@ class StorageManager:
         return quota.get_status(agent_name, self.filesystem.semantic_analyzer.categories)
 
     def address_request(self, agent_request):
-        result = self.filesystem.address_request(agent_request)
+        if isinstance(agent_request.query, ApplyDeduplicationQuery):
+            try:
+                result = self.filesystem.sto_apply_deduplication(
+                    agent_request.query.plan, agent_request.agent_name
+                )
+            except Exception as error:
+                return StorageResponse(response_message=f"Cleanup stopped: {error}",
+                                       error=str(error), finished=True)
+        else:
+            result = self.filesystem.address_request(agent_request)
+        if agent_request.query.operation_type == "deduplicate_files" and isinstance(result, dict):
+            return DeduplicationResponse(
+                response_message=f"Found {len(result['groups'])} duplicate candidate groups.",
+                deduplication=result, finished=True,
+            )
         return StorageResponse(
             response_message=result,
             finished=True

@@ -139,7 +139,8 @@ class QueryRequest(BaseModel):
 
 class OperationDecisionRequest(BaseModel):
     confirmation_id: str = Field(min_length=1)
-    decision: Literal["approve", "cancel"]
+    decision: Literal["approve", "cancel", "select"]
+    delete_ids: Optional[Dict[str, list[str]]] = None
 
 
 def initialize_llm_cores(config: dict) -> Any:
@@ -629,7 +630,7 @@ def submit_operation_decision(request_id: str, request: OperationDecisionRequest
     """Resume the original executor's checkpoint without parsing the command again."""
     try:
         return SysCallWrapper.resume_file_operation(
-            request_id, request.confirmation_id, request.decision
+            request_id, request.confirmation_id, request.decision, request.delete_ids
         )
     except OperationDecisionError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from error

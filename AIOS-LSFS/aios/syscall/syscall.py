@@ -33,6 +33,7 @@ from aios.hooks.types.tool import ToolRequestQueue
 from cerebrum.llm.apis import LLMQuery, LLMResponse
 from cerebrum.memory.apis import MemoryQuery, MemoryResponse
 from cerebrum.storage.apis import StorageQuery, StorageResponse
+from aios.storage.deduplication import ApplyDeduplicationQuery, build_deletion_plan
 from cerebrum.tool.apis import ToolQuery, ToolResponse
 
 @dataclass
@@ -46,6 +47,8 @@ class FileOperationState:
     results: List[Dict[str, Any]] = field(default_factory=list)
     status: str = "running"
     confirmation_id: Optional[str] = None
+    deduplication_scan: Optional[dict] = None
+    deletion_plan: Optional[dict] = None
 
 
 class OperationDecisionError(ValueError):
@@ -272,7 +275,9 @@ class SyscallExecutor:
             "You parse user instructions into file system tool calls. "
             "If the request can be divided into multiple operations, return one tool call "
             "for each operation in the required execution order. "
-            "Do not omit operations from the user's request."
+            "Do not omit operations from the user's request. "
+            "For existing duplicate cleanup, use deduplicate_files. It handles selection and deletion "
+            "after terminal confirmation; never add delete_file calls to implement its cleanup."
         )
         query.messages = [{"role": "system", "content": system_prompt}] + query.messages
         query.tools = storage_syscalls
@@ -302,7 +307,7 @@ class SyscallExecutor:
         return None
 
     def _pause_file_operation(
-        self, state: FileOperationState, message: str
+        self, state: FileOperationState, message: str, *, deduplication: Optional[dict] = None
     ) -> Dict[str, Any]:
         operation = state.operations[state.next_index]
         parameters = operation["parameters"]
@@ -329,7 +334,28 @@ class SyscallExecutor:
                 "operation": preview,
                 "completed_count": state.next_index,
                 "total_count": len(state.operations),
+                **({"deduplication": deduplication} if deduplication is not None else {}),
             }
+
+    def _pause_deduplication(self, state):
+        def preview(record):
+            return {key: record[key] for key in
+                    ("id", "file_path", "size_bytes", "modified_at", "preview")}
+        scan = state.deduplication_scan
+        details = {"root_dir": scan["root_dir"], "threshold": scan["threshold"],
+                   "scanned_count": scan["scanned_count"], "skipped": scan["skipped"]}
+        if state.deletion_plan is None:
+            details.update(stage="select", groups=[
+                {"id": group["id"], "files": [preview(item) for item in group["files"]],
+                 "pairs": group["pairs"]} for group in scan["groups"]
+            ])
+            message = "Select files to delete in each group. No files have been deleted."
+        else:
+            plan = state.deletion_plan
+            details.update(stage="delete", retained=[preview(item) for item in plan["retained"]],
+                           deletions=[{"file": preview(item["file"])} for item in plan["deletions"]])
+            message = "Confirm the deletion list."
+        return self._pause_file_operation(state, message, deduplication=details)
 
     def _run_file_operations(
         self, state: FileOperationState, *, approved_index: Optional[int] = None
@@ -338,6 +364,36 @@ class SyscallExecutor:
         try:
             while state.next_index < len(state.operations):
                 operation = state.operations[state.next_index]
+                if operation["name"] == "deduplicate_files":
+                    if state.deletion_plan is None:
+                        scan_response = self.execute_storage_syscall(state.agent_name, StorageQuery(
+                            operation_type="deduplicate_files", params={}
+                        ))["response"]
+                        scan = getattr(scan_response, "deduplication", None)
+                        if scan is None:
+                            raise ValueError(scan_response.response_message)
+                        if scan["groups"]:
+                            state.deduplication_scan = scan
+                            response = self._pause_deduplication(state)
+                            paused = True
+                            return response
+                        result = (f"No duplicate candidates found (cosine >= {scan['threshold']}); "
+                                  f"compared {scan['scanned_count']} files. "
+                                  f"Skipped files: {json.dumps(scan['skipped'], ensure_ascii=False)}")
+                    else:
+                        if state.next_index != approved_index:
+                            raise ValueError("Duplicate deletion requires confirmation")
+                        response = self.execute_storage_syscall(state.agent_name, ApplyDeduplicationQuery(
+                            operation_type="deduplicate_files", params={}, plan=state.deletion_plan
+                        ))["response"]
+                        result = response.response_message
+                        if response.error:
+                            raise ValueError(result)
+                    state.results.append({"operation": operation["name"], "parameters": {}, "result": result})
+                    state.deduplication_scan = None
+                    state.deletion_plan = None
+                    state.next_index += 1
+                    continue
                 # Approval applies only to this operation, never subsequent writes.
                 if state.next_index != approved_index:
                     message = self._get_confirmation_request(state, operation)
@@ -375,16 +431,30 @@ class SyscallExecutor:
                     self.pending_operations.pop(state.request_id, None)
 
     def resume_file_operation(
-        self, request_id: str, confirmation_id: str, decision: str
+        self, request_id: str, confirmation_id: str, decision: str,
+        delete_ids: Optional[Dict[str, List[str]]] = None,
     ) -> str | Dict[str, Any]:
-        if decision not in ("approve", "cancel"):
-            raise OperationDecisionError("Decision must be approve or cancel", 400)
+        if decision not in ("approve", "cancel", "select"):
+            raise OperationDecisionError("Decision must be approve, cancel, or select", 400)
         with self.pending_operations_lock:
             state = self.pending_operations.get(request_id)
             if state is None:
                 raise OperationDecisionError("Pending operation not found or already finished", 404)
             if state.status != "needs_confirmation" or state.confirmation_id != confirmation_id:
                 raise OperationDecisionError("This confirmation is no longer awaiting a decision")
+            selecting = state.deduplication_scan is not None and state.deletion_plan is None
+            if decision == "select":
+                if not selecting:
+                    raise OperationDecisionError("This operation is not awaiting a file selection", 400)
+                try:
+                    plan = build_deletion_plan(state.deduplication_scan, delete_ids or {})
+                except (ValueError, TypeError) as error:
+                    raise OperationDecisionError(str(error), 400) from error
+                state.deletion_plan = plan
+            elif decision == "approve" and selecting:
+                raise OperationDecisionError("Select files to delete before approving deletion", 400)
+            elif delete_ids is not None:
+                raise OperationDecisionError("File IDs to delete are only accepted for selection", 400)
             # Claim this decision before releasing the lock or executing any syscall.
             state.confirmation_id = None
             if decision == "cancel":
@@ -399,6 +469,8 @@ class SyscallExecutor:
                 }
             state.status = "running"
             approved_index = state.next_index
+        if decision == "select":
+            return self._pause_deduplication(state)
         return self._run_file_operations(state, approved_index=approved_index)
 
     def _summarize_file_operations(self, state: FileOperationState) -> str:

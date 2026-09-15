@@ -7,6 +7,18 @@ storage_syscalls = [
     {
         "type": "function",
         "function": {
+            "name": "deduplicate_files",
+            "description": "Find and clean up existing semantically duplicate files owned by the current "
+                           "user in the current storage root. Uses cosine similarity >= 0.95. "
+                           "The terminal asks which files to delete and confirms the deletion list. "
+                           "Use this tool for duplicate cleanup; do not guess duplicates or generate "
+                           "separate delete_file calls for this task.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_file",
             "description": "create a file",
             "parameters": {
